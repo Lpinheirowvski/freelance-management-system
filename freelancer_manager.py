@@ -1,6 +1,7 @@
-
 import json
 import os
+import math
+import tempfile
 from datetime import datetime
 
 ARQUIVO = "freelancers.json"
@@ -12,15 +13,25 @@ def carregar_dados():
         try:
             with open(ARQUIVO, "r", encoding="utf-8") as arquivo:
                 return json.load(arquivo)
-        except (json.JSONDecodeError, OSError):
-            print("Erro ao carregar dados.")
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ValueError("Erro ao carregar dados. Arquivo preservado; corrija antes de continuar.") from exc
 
     return []
 
 
 def salvar_dados(clientes):
-    with open(ARQUIVO, "w", encoding="utf-8") as arquivo:
-        json.dump(clientes, arquivo, indent=4, ensure_ascii=False)
+    pasta = os.path.dirname(os.path.abspath(ARQUIVO))
+    caminho_temporario = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=pasta, delete=False) as arquivo:
+            caminho_temporario = arquivo.name
+            json.dump(clientes, arquivo, indent=4, ensure_ascii=False, allow_nan=False)
+            arquivo.flush()
+            os.fsync(arquivo.fileno())
+        os.replace(caminho_temporario, ARQUIVO)
+    finally:
+        if caminho_temporario and os.path.exists(caminho_temporario):
+            os.unlink(caminho_temporario)
 
 
 def linha():
@@ -48,7 +59,7 @@ def cadastrar_cliente(clientes):
         horas = float(input("Horas trabalhadas: "))
         valor_hora = float(input("Valor por hora (USD): "))
 
-        if horas <= 0 or valor_hora < 0:
+        if not math.isfinite(horas) or not math.isfinite(valor_hora) or horas <= 0 or valor_hora < 0:
             print("Valores invalidos!")
             return
 
@@ -59,14 +70,14 @@ def cadastrar_cliente(clientes):
     total = round(horas * valor_hora, 2)
 
     cliente = {
-        "id": len(clientes) + 1,
+        "id": max((c["id"] for c in clientes), default=0) + 1,
         "nome": nome,
         "projeto": projeto,
         "horas": horas,
         "valor_hora": valor_hora,
         "total": total,
         "pago": False,
-        "data": datetime.now().strftime("%d/%m/%Y")
+        "data": datetime.now().strftime("%d/%m/%Y"),
     }
 
     clientes.append(cliente)
@@ -113,6 +124,7 @@ def registrar_pagamento(clientes):
                 return
 
             cliente["pago"] = True
+            cliente["data_pagamento"] = datetime.now().strftime("%d/%m/%Y")
             salvar_dados(clientes)
 
             print("Pagamento registrado!")
@@ -121,14 +133,26 @@ def registrar_pagamento(clientes):
     print("Projeto nao encontrado.")
 
 
+def recebido_no_mes(clientes, mes=None):
+    mes = mes or datetime.now().strftime("%m/%Y")
+    total = 0
+    for cliente in clientes:
+        if cliente.get("pago") and cliente.get("data_pagamento"):
+            try:
+                data = datetime.strptime(cliente["data_pagamento"], "%d/%m/%Y")
+            except (ValueError, TypeError):
+                continue
+            if data.strftime("%m/%Y") == mes:
+                total += cliente["total"]
+    return total
+
+
 def relatorio_financeiro(clientes):
     titulo("RELATORIO FINANCEIRO")
 
     faturamento = sum(c["total"] for c in clientes)
 
-    recebido = sum(
-        c["total"] for c in clientes if c["pago"]
-    )
+    recebido = sum(c["total"] for c in clientes if c["pago"])
 
     pendente = faturamento - recebido
 
@@ -144,7 +168,10 @@ def relatorio_financeiro(clientes):
     print("META FINANCEIRA")
     linha()
 
-    progresso = min((recebido / META_MENSAL) * 100, 100)
+    recebido_mes = recebido_no_mes(clientes)
+    progresso = min((recebido_mes / META_MENSAL) * 100, 100)
+    print(f"Recebido neste mes: US$ {recebido_mes:.2f}")
+    print("Pagamentos sem data nao contam para a meta mensal.")
 
     print(f"Meta: US$ {META_MENSAL:.2f}")
     print(f"Progresso: {progresso:.1f}%")
@@ -153,9 +180,9 @@ def relatorio_financeiro(clientes):
 
     print("[" + "#" * barras + "-" * (20 - barras) + "]")
 
-    if recebido >= META_MENSAL:
+    if recebido_mes >= META_MENSAL:
         print("META ATINGIDA! DALE!")
-    elif recebido >= META_MENSAL / 2:
+    elif recebido_mes >= META_MENSAL / 2:
         print("Mais da metade da meta!")
     else:
         print("Continuar trabalhando!")
@@ -168,21 +195,18 @@ def ranking_clientes(clientes):
         print("Nenhum projeto cadastrado.")
         return
 
-    ranking = sorted(
-        clientes,
-        key=lambda c: c["total"],
-        reverse=True
-    )
+    ranking = sorted(clientes, key=lambda c: c["total"], reverse=True)
 
     for posicao, cliente in enumerate(ranking, start=1):
-        print(
-            f"{posicao}. {cliente['nome']} "
-            f"- US$ {cliente['total']:.2f}"
-        )
+        print(f"{posicao}. {cliente['nome']} - US$ {cliente['total']:.2f}")
 
 
 def menu():
-    clientes = carregar_dados()
+    try:
+        clientes = carregar_dados()
+    except ValueError as exc:
+        print(str(exc))
+        return
 
     while True:
         titulo("FREELANCER MANAGER v1.0")
